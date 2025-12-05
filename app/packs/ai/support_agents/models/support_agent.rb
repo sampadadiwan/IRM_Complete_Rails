@@ -14,7 +14,7 @@ class SupportAgent < ApplicationRecord
   include WithFolder
   include SupportAgentHelper
 
-  AGENT_TYPES = %w[KycOnboardingAgent PortfolioCompanyAgent PortfolioReportingAgent1].freeze
+  AGENT_TYPES = %w[KycOnboardingAgent PortfolioCompanyAgent PortfolioReportingAgent1 PortfolioChatAgent].freeze
 
   belongs_to :entity
 
