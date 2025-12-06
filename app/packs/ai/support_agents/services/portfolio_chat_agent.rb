@@ -18,7 +18,9 @@ class PortfolioChatAgent < SupportAgentService
   #   user_message: "What's the company's revenue?"
   # )
 
-  step :initialize_agent
+  # Override parent's initialize_agent to skip RubyLLM initialization
+  # PortfolioChatAgent uses Langchain instead
+  step :initialize_chat_agent
   step :setup_langchain_assistant
   step :execute_chat
   step :persist_conversation
@@ -39,6 +41,14 @@ class PortfolioChatAgent < SupportAgentService
   end
 
   private
+
+  # Initialize chat agent - simpler than parent's initialize_agent
+  # We don't need RubyLLM since we use Langchain
+  def initialize_chat_agent(ctx, **)
+    @support_agent = SupportAgent.find(ctx[:support_agent_id])
+    ctx[:support_agent] = @support_agent
+    # No LLM initialization here - handled in setup_langchain_assistant
+  end
 
   # Sets up the Langchain Assistant with conversation history
   # This is where the magic happens - assistant manages memory automatically!
