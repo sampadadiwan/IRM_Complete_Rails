@@ -63,10 +63,9 @@ class PortfolioChatAgent < SupportAgentService
     # Initialize Langchain LLM
     llm = initialize_langchain_llm
     
-    # Create assistant with tools
+    # Create assistant WITHOUT tools for now
     assistant = Langchain::Assistant.new(
       llm: llm,
-      tools: [self], # This agent provides tool methods
       instructions: build_system_instructions(chat_session)
     )
     
@@ -166,17 +165,12 @@ class PortfolioChatAgent < SupportAgentService
       - Answer questions about the company and report
       - Provide insights and analysis
       - Help refine report sections
-      - Use web search when you need current information
       
       Guidelines:
       - Be professional and concise
       - Base responses on facts and data
-      - If you don't know something, admit it and suggest searching
+      - If you don't know something, be honest about it
       - When referencing report sections, be specific
-      - Always cite sources when using web search results
-      
-      Available tools:
-      - web_search: Search the web for current information
     INSTRUCTIONS
   end
 
