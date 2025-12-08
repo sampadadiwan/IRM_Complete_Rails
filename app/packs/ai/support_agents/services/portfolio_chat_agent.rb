@@ -1,12 +1,13 @@
 class PortfolioChatAgent < SupportAgentService
   # PortfolioChatAgent provides conversational AI assistance for portfolio reports
-  # with full conversation memory and tool execution capabilities.
+  # with full conversation memory, tool execution, and document context capabilities.
   #
   # Unlike other agents, this is STATEFUL - it maintains conversation history
   # across multiple interactions using Langchain::Assistant for automatic memory management.
   #
   # == Features ==
   # - Full conversation memory (loads from ai_chat_messages)
+  # - Document folder context (loads documents from specified folder)
   # - Tool execution (web search, data queries)
   # - Context-aware responses
   # - Persistent conversation history
@@ -15,12 +16,14 @@ class PortfolioChatAgent < SupportAgentService
   # result = PortfolioChatAgent.call(
   #   support_agent_id: agent.id,
   #   target: ai_chat_session,
-  #   user_message: "What's the company's revenue?"
+  #   user_message: "What's the company's revenue?",
+  #   document_folder_path: "/path/to/documents"  # Optional
   # )
 
   # Override parent's initialize_agent to skip RubyLLM initialization
   # PortfolioChatAgent uses Langchain instead
   step :initialize_chat_agent
+  step :load_document_context        # NEW: Load documents from folder
   step :setup_langchain_assistant
   step :execute_chat
   step :persist_conversation
@@ -50,23 +53,51 @@ class PortfolioChatAgent < SupportAgentService
     # No LLM initialization here - handled in setup_langchain_assistant
   end
 
-  # Sets up the Langchain Assistant with conversation history
+  # Load document context from folder
+  # Extracts text from all documents in the specified folder
+  # 
+  # @param ctx [Hash] execution context
+  def load_document_context(ctx, **)
+    folder_path = ctx[:document_folder_path]
+    
+    if folder_path.blank?
+      Rails.logger.info "[PortfolioChatAgent] No document folder path provided, skipping document context"
+      ctx[:documents_context] = ""
+      return
+    end
+    
+    Rails.logger.info "[PortfolioChatAgent] Loading documents from folder: #{folder_path}"
+    
+    begin
+      documents_context = load_documents_from_folder(folder_path)
+      ctx[:documents_context] = documents_context
+      
+      doc_count = documents_context.present? ? documents_context.scan(/=== Document:/).count : 0
+      Rails.logger.info "[PortfolioChatAgent] Loaded #{doc_count} documents into context"
+    rescue => e
+      Rails.logger.error "[PortfolioChatAgent] Error loading documents: #{e.message}"
+      ctx[:documents_context] = ""
+    end
+  end
+
+  # Sets up the Langchain Assistant with conversation history and document context
   # This is where the magic happens - assistant manages memory automatically!
   #
   # @param ctx [Hash] execution context
   # @param target [AiChatSession] the chat session to work with
   def setup_langchain_assistant(ctx, target:, **)
     chat_session = target
+    documents_context = ctx[:documents_context] || ""
     
     Rails.logger.info "[PortfolioChatAgent] Setting up assistant for chat session #{chat_session.id}"
     
     # Initialize Langchain LLM
     llm = initialize_langchain_llm
     
-    # Create assistant WITHOUT tools for now
+    # Create assistant with document context in system instructions
     assistant = Langchain::Assistant.new(
       llm: llm,
-      instructions: build_system_instructions(chat_session)
+      instructions: build_system_instructions(chat_session, documents_context)
     )
     
     # Load conversation history from database into assistant
@@ -128,6 +159,107 @@ class PortfolioChatAgent < SupportAgentService
 
   # == Helper Methods ==
 
+  # Loads documents from a local folder path
+  # Later this will be updated to load from S3 using folder_id
+  #
+  # @param folder_path [String] path to folder containing documents
+  # @return [String] formatted document context for LLM
+  def load_documents_from_folder(folder_path)
+    return "" unless folder_path.present? && Dir.exist?(folder_path)
+    
+    documents = []
+    supported_extensions = %w[.pdf .txt .md .docx]
+    
+    # Find all supported files in folder
+    Dir.glob(File.join(folder_path, "*")).each do |file_path|
+      next unless File.file?(file_path)
+      
+      extension = File.extname(file_path).downcase
+      next unless supported_extensions.include?(extension)
+      
+      # Extract text based on file type
+      begin
+        text = extract_text_from_file(file_path, extension)
+        
+        documents << {
+          name: File.basename(file_path),
+          path: file_path,
+          content: text[0..5000]  # First 5000 chars to avoid context overflow
+        }
+        
+        # Limit to 10 documents to avoid context window issues
+        break if documents.count >= 10
+      rescue => e
+        Rails.logger.warn "[PortfolioChatAgent] Could not extract text from #{file_path}: #{e.message}"
+      end
+    end
+    
+    format_documents_for_llm(documents)
+  end
+
+  # Extract text from file based on extension
+  # @param file_path [String] path to file
+  # @param extension [String] file extension
+  # @return [String] extracted text
+  def extract_text_from_file(file_path, extension)
+    case extension
+    when '.txt', '.md'
+      File.read(file_path, encoding: 'UTF-8')
+    when '.pdf'
+      extract_pdf_text(file_path)
+    when '.docx'
+      extract_docx_text(file_path)
+    else
+      "Cannot extract text from #{extension} files"
+    end
+  end
+
+  # Extract text from PDF using pdf-reader gem
+  # @param file_path [String] path to PDF file
+  # @return [String] extracted text
+  def extract_pdf_text(file_path)
+    require 'pdf-reader'
+    
+    reader = PDF::Reader.new(file_path)
+    text = []
+    
+    # Extract text from first 20 pages to avoid overwhelming context
+    reader.pages.first(20).each do |page|
+      text << page.text
+    end
+    
+    text.join("\n\n")
+  rescue => e
+    Rails.logger.error "[PortfolioChatAgent] PDF extraction error: #{e.message}"
+    "Error extracting PDF: #{e.message}"
+  end
+
+  # Extract text from DOCX
+  # @param file_path [String] path to DOCX file
+  # @return [String] extracted text
+  def extract_docx_text(file_path)
+    # Placeholder - implement based on your DOCX extraction needs
+    # You might use docx gem or other extraction tools
+    "DOCX extraction not yet implemented. File: #{File.basename(file_path)}"
+  end
+
+  # Format documents for LLM consumption
+  # @param documents [Array<Hash>] array of document hashes
+  # @return [String] formatted string for LLM
+  def format_documents_for_llm(documents)
+    return "No documents available." if documents.empty?
+    
+    formatted = documents.map do |doc|
+      <<~DOC
+        === Document: #{doc[:name]} ===
+        #{doc[:content]}
+        
+      DOC
+    end
+    
+    formatted.join("\n---\n\n")
+  end
+
   # Initializes the Langchain LLM client
   # @return [Langchain::LLM::OpenAI] configured LLM instance
   def initialize_langchain_llm
@@ -147,31 +279,49 @@ class PortfolioChatAgent < SupportAgentService
     )
   end
 
-  # Builds system instructions for the assistant
+  # Builds system instructions for the assistant with document context
   # @param chat_session [AiChatSession] the chat session
+  # @param documents_context [String] formatted document context
   # @return [String] system instructions
-  def build_system_instructions(chat_session)
+  def build_system_instructions(chat_session, documents_context = "")
     report = chat_session.ai_portfolio_report
     company = report.portfolio_company
     
-    <<~INSTRUCTIONS
+    instructions = <<~INSTRUCTIONS
       You are an AI assistant helping analyze portfolio company: #{company.name}.
       
       Report ID: #{report.id}
       Analyst: #{chat_session.analyst.name}
       Report Date: #{report.report_date}
       
+    INSTRUCTIONS
+    
+    # Add document context if available
+    if documents_context.present?
+      instructions += <<~DOCS
+        AVAILABLE DOCUMENTS:
+        #{documents_context}
+        
+      DOCS
+    end
+    
+    instructions += <<~GUIDELINES
       Your role:
       - Answer questions about the company and report
       - Provide insights and analysis
       - Help refine report sections
+      #{documents_context.present? ? "- Use information from the documents above when relevant" : ""}
       
       Guidelines:
       - Be professional and concise
       - Base responses on facts and data
+      #{documents_context.present? ? "- When using document information, cite the document name" : ""}
+      #{documents_context.present? ? "- If information isn't in the documents, acknowledge this" : ""}
       - If you don't know something, be honest about it
       - When referencing report sections, be specific
-    INSTRUCTIONS
+    GUIDELINES
+    
+    instructions
   end
 
   # Loads conversation history from database into assistant
